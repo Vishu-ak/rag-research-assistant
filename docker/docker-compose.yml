@@ -1,0 +1,153 @@
+version: "3.9"
+
+# ============================================================
+# RAG Research Assistant — Docker Compose
+#
+# Services:
+#   chromadb  — ChromaDB vector store (persistent)
+#   rag-api   — FastAPI RAG Research Assistant
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up
+#   docker compose -f docker/docker-compose.yml up --build
+# ============================================================
+
+name: rag-research-assistant
+
+# ---------------------------------------------------------------------------
+# Shared networks
+# ---------------------------------------------------------------------------
+networks:
+  rag-network:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Persistent volumes
+# ---------------------------------------------------------------------------
+volumes:
+  chroma-data:
+    driver: local
+  rag-logs:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # ----------------------------------------------------------
+  # ChromaDB — Vector Store
+  # ----------------------------------------------------------
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: rag-chromadb
+    restart: unless-stopped
+    environment:
+      CHROMA_SERVER_AUTH_PROVIDER: ""
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma-data:/chroma/chroma
+    ports:
+      - "8000:8000"
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------
+  # RAG Research Assistant API
+  # ----------------------------------------------------------
+  rag-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    container_name: rag-api
+    restart: unless-stopped
+    depends_on:
+      chromadb:
+        condition: service_healthy
+    environment:
+      # LLM Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      LLM_BACKEND: ${LLM_BACKEND:-openai}
+
+      # Ollama (for local inference, if preferred)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+
+      # Embedding
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-sentence-transformers}
+      SENTENCE_TRANSFORMER_MODEL: ${SENTENCE_TRANSFORMER_MODEL:-BAAI/bge-large-en-v1.5}
+      RERANKER_MODEL: ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+
+      # ChromaDB — connect to the service container
+      CHROMA_USE_SERVER: "true"
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-rag_documents}
+
+      # Retrieval
+      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-20}
+      RERANK_TOP_K: ${RERANK_TOP_K:-5}
+      HYBRID_DENSE_WEIGHT: ${HYBRID_DENSE_WEIGHT:-0.7}
+
+      # Chunking
+      CHUNK_SIZE: ${CHUNK_SIZE:-512}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-64}
+      CHUNKING_STRATEGY: ${CHUNKING_STRATEGY:-recursive}
+
+      # API
+      API_HOST: "0.0.0.0"
+      API_PORT: "8080"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      API_SECRET_KEY: ${API_SECRET_KEY:-change-me-in-production}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - rag-logs:/app/logs
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s    # Allow time for model downloads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Allow reaching Ollama on host
+
+  # ----------------------------------------------------------
+  # (Optional) Ollama local LLM inference server
+  # Uncomment to run a local Ollama instance alongside the API.
+  # ----------------------------------------------------------
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: rag-ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   ports:
+  #     - "11434:11434"
+  #   networks:
+  #     - rag-network
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
